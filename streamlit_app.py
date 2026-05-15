@@ -139,13 +139,12 @@ if archivos_prod and archivo_rel:
         df_resumen = df_resumen.rename(columns={'Perfo_SQL': 'OEE_Mensual (%)'})
         df_resumen = df_resumen.sort_values('OEE_Mensual (%)', ascending=False)
         
-        # Aplicamos el estilo
+# Aplicamos el estilo
         st.dataframe(
-            df_resumen.style.applymap(color_performance, subset=['OEE_Mensual (%)'])
+            df_resumen.style.map(color_performance, subset=['OEE_Mensual (%)'])
             .format({'OEE_Mensual (%)': '{:.1f}%'}),
             use_container_width=True, hide_index=True
         )
-
     st.divider()
     
     # --- SECCIÓN: AUDITORÍA INDIVIDUAL ---
