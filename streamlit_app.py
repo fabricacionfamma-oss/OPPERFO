@@ -54,6 +54,12 @@ def extraer_sql_data(mes, anio):
     df_mes = pd.concat([df_m_fa, df_m_fu], ignore_index=True)
     df_dia = pd.concat([df_d_fa, df_d_fu], ignore_index=True)
     
+    # --- FILTRO NUEVO: Eliminar operarios con legajo que empiece con FW ---
+    if not df_mes.empty:
+        df_mes = df_mes[~df_mes['Legajo'].astype(str).str.upper().str.startswith('FW')]
+    if not df_dia.empty:
+        df_dia = df_dia[~df_dia['Legajo'].astype(str).str.upper().str.startswith('FW')]
+    
     for df in [df_mes, df_dia]:
         if not df.empty:
             df['Perfo_SQL'] = np.where(df['Perfo_SQL'] > 1.5, df['Perfo_SQL']/100, df['Perfo_SQL']) * 100
