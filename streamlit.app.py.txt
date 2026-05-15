@@ -1,0 +1,65 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+
+st.set_page_config(page_title="Auditoria Gerencial", layout="wide")
+
+st.title("📊 Panel de Auditoría: Performance Ajustada")
+
+# Carga de datos
+try:
+    df_d = pd.read_csv('df_diario.csv')
+    df_m = pd.read_csv('df_mes_sql.csv')
+    df_d['Fecha_Str'] = pd.to_datetime(df_d['Fecha']).dt.strftime('%d/%m/%Y')
+except:
+    st.error("No se encontraron los archivos CSV. Por favor, súbelos al repositorio.")
+    st.stop()
+
+# Filtros laterales
+st.sidebar.header("Filtros")
+planta = st.sidebar.selectbox("Seleccionar Planta", df_m['Planta'].unique())
+ops = df_m[df_m['Planta'] == planta]['Operador_Full'].unique()
+op_sel = st.sidebar.selectbox("Seleccionar Operador", ops)
+
+# Datos del operador
+df_op = df_d[df_d['Operador_Full'] == op_sel].sort_values('Fecha')
+
+st.header(f"👨‍🔧 {op_sel}")
+
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("1. Excluir Días Atípicos")
+    dias_a_quitar = st.multiselect(
+        "Selecciona los días que deseas ELIMINAR del promedio:",
+        options=df_op['Fecha_Str'].tolist()
+    )
+    
+    # Filtrar días
+    df_filtrado = df_op[~df_op['Fecha_Str'].isin(dias_a_quitar)]
+
+with col2:
+    st.subheader("2. Ajuste Manual")
+    ajuste = st.slider("Sumar/Restar % de Performance General:", -20.0, 20.0, 0.0, 0.5)
+
+# Cálculos
+perfo_base = df_filtrado['Perfo_SQL'].mean() if not df_filtrado.empty else 0
+perfo_final = perfo_base + ajuste
+
+# Métricas
+m1, m2, m3 = st.columns(3)
+m1.metric("Perfo. Promedio Original", f"{df_op['Perfo_SQL'].mean():.1f}%")
+m2.metric("Perfo. Días Válidos", f"{perfo_base:.1f}%")
+m3.metric("🎯 PERFO. FINAL AUDITADA", f"{perfo_final:.1f}%", f"{ajuste:+.1f}% Ajuste")
+
+# Gráfico
+df_op['Estado'] = df_op['Fecha_Str'].apply(lambda x: 'Excluido' if x in dias_a_quitar else 'Válido')
+fig = px.bar(df_op, x='Fecha_Str', y='Perfo_SQL', color='Estado', 
+             color_discrete_map={'Válido':'#2E86C1', 'Excluido':'#D5D8DC'},
+             title="Evolución Diaria (Barras grises son días excluidos)")
+fig.add_hline(y=perfo_final, line_dash="dot", line_color="red", annotation_text="Meta Auditada")
+st.plotly_chart(fig, use_container_width=True)
+
+# Tabla de contexto (Excel)
+st.subheader("📝 Detalle de Piezas y Cadencia (Días Válidos)")
+st.dataframe(df_filtrado[['Fecha_Str', 'Pzas_Real', 'Pzas_Esp', 'Cadencia_PH', 'Perfo_SQL']], hide_index=True)
