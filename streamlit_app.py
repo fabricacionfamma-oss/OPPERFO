@@ -103,8 +103,13 @@ if archivos_prod and archivo_rel:
         df_p['Min_Prod'] = pd.to_numeric(df_p['Min_Prod'].astype(str).str.replace(',','.'), errors='coerce').fillna(0)
         df_p['Cod_Match'] = df_p['Codigo_Prod'].apply(limpiar_codigo)
         
+        # --- SOLUCIÓN DEL ERROR DE CELDAS VACÍAS AQUÍ ---
         c_ciclo = next((c for c in df_p.columns if 'conteo' in c.lower() or 'ciclo orden' in c.lower()), None)
-        df_p['Pzas_Por_Ciclo'] = df_p[c_ciclo].astype(str).apply(lambda x: 2.0 if '2' in x else 1.0) if c_ciclo else 1.0
+        if c_ciclo:
+            df_p['Pzas_Por_Ciclo'] = np.where(df_p[c_ciclo].astype(str).str.contains('2', na=False), 2.0, 1.0)
+        else:
+            df_p['Pzas_Por_Ciclo'] = 1.0
+        # ------------------------------------------------
 
         # Unpivot
         col_usuarios = [c for c in df_p.columns if 'Usuario' in c]
