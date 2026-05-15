@@ -2,13 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
 import re
 
 # ==========================================
 # 1. CONFIGURACIÓN DE LA PÁGINA
 # ==========================================
-st.set_page_config(page_title="Panel Gerencial - Wiidem", layout="wide", page_icon="🏭")
+st.set_page_config(page_title="Panel Gerencial - Auditoría", layout="wide", page_icon="📊")
 
 st.markdown("""
     <style>
@@ -20,6 +19,13 @@ st.markdown("""
 def limpiar_codigo(t):
     if pd.isna(t): return ""
     return re.sub(r'[^A-Z0-9]', '', str(t).upper())
+
+# Función para aplicar colores a la tabla
+def color_performance(val):
+    if val > 100 or val < 80:
+        return 'color: #D32F2F; font-weight: bold;' # Rojo para desvíos
+    else:
+        return 'color: #2E7D32;' # Verde para rango normal (80-100)
 
 # ==========================================
 # 2. MOTOR SQL (AUTOMÁTICO)
@@ -40,12 +46,15 @@ def extraer_sql_data(mes, anio):
                       WHERE MONTH(p.Date) = {mes} AND YEAR(p.Date) = {anio}
                       GROUP BY op.Name, op.Docket, DAY(p.Date)"""
             return conn.query(q_m), conn.query(q_d)
-        except Exception as e:
-            st.warning(f"No se pudo conectar a {conn_name}: {e}")
+        except Exception:
             return pd.DataFrame(), pd.DataFrame()
 
     df_m_fa, df_d_fa = fetch_db("famma_db")
     df_m_fu, df_d_fu = fetch_db("fumi_db")
+    
+    # Marcamos la empresa antes de unir
+    df_m_fa['Empresa'] = 'FAMMA'
+    df_m_fu['Empresa'] = 'FUMISCOR'
     
     df_mes = pd.concat([df_m_fa, df_m_fu], ignore_index=True)
     df_dia = pd.concat([df_d_fa, df_d_fu], ignore_index=True)
@@ -53,12 +62,12 @@ def extraer_sql_data(mes, anio):
     for df in [df_mes, df_dia]:
         if not df.empty:
             df['Perfo_SQL'] = np.where(df['Perfo_SQL'] > 1.5, df['Perfo_SQL']/100, df['Perfo_SQL']) * 100
-            df['Operador_Full'] = df['Nombre'].astype(str) + " (" + df['Legajo'].astype(str) + ")"
+            df['Operador_Full'] = df['Nombre'].astype(str).str.upper() + " (" + df['Legajo'].astype(str) + ")"
             
     return df_mes.drop_duplicates(subset=['Operador_Full']), df_dia
 
 # ==========================================
-# 3. BARRA LATERAL (FILTROS Y ARCHIVOS)
+# 3. BARRA LATERAL
 # ==========================================
 st.sidebar.header("📅 Periodo a Auditar")
 mes_sel = st.sidebar.slider("Mes", 1, 12, 4)
@@ -70,158 +79,113 @@ archivos_prod = st.sidebar.file_uploader("1. Producción (Excel/CSV)", type=["xl
 archivo_rel = st.sidebar.file_uploader("2. Relación Máquina-Producto", type=["xlsx", "csv"])
 
 # ==========================================
-# 4. PROCESAMIENTO HÍBRIDO (EXCEL + SQL)
+# 4. PROCESAMIENTO
 # ==========================================
 if archivos_prod and archivo_rel:
-    with st.spinner("Procesando datos y sincronizando con base de datos Wiidem..."):
-        # 1. SQL
+    with st.spinner("Sincronizando con Wiidem..."):
         df_sql_mes, df_sql_dia = extraer_sql_data(mes_sel, anio_sel)
         
-        # 2. Excel Relaciones
+        # Procesar Relaciones
         df_rel_raw = pd.read_excel(archivo_rel) if archivo_rel.name.endswith('xlsx') else pd.read_csv(archivo_rel)
         df_rel = df_rel_raw[['Código Producto', 'Tiempo Ciclo']].copy()
         df_rel.columns = ['Cod_Orig', 'TC_Master']
         df_rel['TC_Master'] = pd.to_numeric(df_rel['TC_Master'].astype(str).str.replace(',','.'), errors='coerce')
         df_rel['Cod_Match'] = df_rel['Cod_Orig'].apply(limpiar_codigo)
-        df_rel = df_rel.dropna(subset=['TC_Master']).drop_duplicates('Cod_Match', keep='last')
+        df_rel = df_rel.dropna(subset=['TC_Master']).drop_duplicates('Cod_Match')
 
-        # 3. Excel Producción
-        df_p_list = []
-        for file in archivos_prod:
-            df_temp = pd.read_excel(file) if file.name.endswith('xlsx') else pd.read_csv(file)
-            df_p_list.append(df_temp)
-            
+        # Procesar Producción
+        df_p_list = [pd.read_excel(f) if f.name.endswith('xlsx') else pd.read_csv(f) for f in archivos_prod]
         df_p = pd.concat(df_p_list, ignore_index=True)
         df_p.columns = [str(c).strip() for c in df_p.columns]
         df_p.rename(columns={'Fábrica': 'Planta', 'Máquina':'Maquina', 'Código Producto/Semielaborado':'Codigo_Prod', 'Tiempo Producción (Min)':'Min_Prod'}, inplace=True, errors='ignore')
         
-        # Filtro de Planta
-        if 'Planta' in df_p.columns:
-            df_p = df_p[df_p['Planta'].astype(str).str.contains('SOLDADURA|ESTAMPADO', case=False, na=False)].copy()
-        
-        df_p['Pzas_Real'] = df_p.get('Buenas', 0) + df_p.get('Retrabajo', 0) + df_p.get('Observadas', 0)
-        df_p['Min_Prod'] = pd.to_numeric(df_p['Min_Prod'].astype(str).str.replace(',','.'), errors='coerce').fillna(0)
+        # Filtro Planta y Limpieza
+        df_p = df_p[df_p['Planta'].astype(str).str.contains('SOLDADURA|ESTAMPADO', case=False, na=False)].copy()
+        df_p['Pzas_Real'] = df_p['Buenas'] + df_p.get('Retrabajo', 0) + df_p.get('Observadas', 0)
         df_p['Cod_Match'] = df_p['Codigo_Prod'].apply(limpiar_codigo)
         
-        # --- SOLUCIÓN DEL ERROR DE CELDAS VACÍAS AQUÍ ---
         c_ciclo = next((c for c in df_p.columns if 'conteo' in c.lower() or 'ciclo orden' in c.lower()), None)
-        if c_ciclo:
-            df_p['Pzas_Por_Ciclo'] = np.where(df_p[c_ciclo].astype(str).str.contains('2', na=False), 2.0, 1.0)
-        else:
-            df_p['Pzas_Por_Ciclo'] = 1.0
-        # ------------------------------------------------
+        df_p['Pzas_Por_Ciclo'] = np.where(df_p[c_ciclo].astype(str).str.contains('2', na=False), 2.0, 1.0) if c_ciclo else 1.0
 
-        # Unpivot
+        # Unpivot y unión con SQL
         col_usuarios = [c for c in df_p.columns if 'Usuario' in c]
-        df_melted = df_p.melt(id_vars=['Planta', 'Fecha', 'Min_Prod', 'Pzas_Real', 'Pzas_Por_Ciclo', 'Cod_Match'], 
-                              value_vars=col_usuarios, value_name='Nombre_Excel').dropna(subset=['Nombre_Excel'])
-        df_melted = df_melted[~df_melted['Nombre_Excel'].astype(str).str.lower().str.contains('nan|usuario|admin|-|^$')]
-
-        # Cruce Nombres -> Legajos
-        if not df_sql_mes.empty:
-            map_nombres = dict(zip(df_sql_mes['Nombre'].str.strip().str.upper(), df_sql_mes['Operador_Full']))
-            df_melted['Nombre_Upper'] = df_melted['Nombre_Excel'].astype(str).str.strip().str.upper()
-            df_melted['Operador_Full'] = df_melted['Nombre_Upper'].map(map_nombres)
-            df_melted['Operador_Full'] = df_melted['Operador_Full'].fillna(df_melted['Nombre_Excel'] + " (S/L)")
-        else:
-            df_melted['Operador_Full'] = df_melted['Nombre_Excel'] + " (S/L)"
-
-        # Cálculos de Producción
-        df_excel = pd.merge(df_melted, df_rel[['Cod_Match', 'TC_Master']], on='Cod_Match', how='left')
-        df_excel['TC_Master'] = df_excel['TC_Master'].fillna(1.0)
-        df_excel['Pzas_Esp'] = (df_excel['Min_Prod'] / df_excel['TC_Master'].replace(0, 1)) * df_excel['Pzas_Por_Ciclo']
-        df_excel['Dia'] = pd.to_datetime(df_excel['Fecha'], errors='coerce').dt.day
+        df_melt = df_p.melt(id_vars=['Planta', 'Maquina', 'Fecha', 'Min_Prod', 'Pzas_Real', 'Cod_Match', 'Pzas_Por_Ciclo'], 
+                            value_vars=col_usuarios, value_name='Nombre_Ex').dropna()
         
-        df_daily_excel = df_excel.groupby(['Operador_Full', 'Fecha', 'Dia']).agg({'Pzas_Real':'sum', 'Pzas_Esp':'sum', 'Min_Prod':'sum'}).reset_index()
+        map_nombres = dict(zip(df_sql_mes['Nombre'].str.strip().str.upper(), df_sql_mes['Operador_Full']))
+        df_melt['Operador_Full'] = df_melt['Nombre_Ex'].str.strip().str.upper().map(map_nombres)
+        df_melt = df_melt.dropna(subset=['Operador_Full'])
 
-        # Cruce con SQL Diario
-        if not df_sql_dia.empty:
-            df_sql_dia_grp = df_sql_dia.groupby(['Operador_Full', 'Dia']).agg({'Perfo_SQL':'mean'}).reset_index()
-            df_final_diario = pd.merge(df_daily_excel, df_sql_dia_grp, on=['Operador_Full', 'Dia'], how='left').fillna(0)
-        else:
-            df_final_diario = df_daily_excel.copy()
-            df_final_diario['Perfo_SQL'] = 0.0
-            
-        df_final_diario['Fecha_Label'] = df_final_diario['Dia'].astype(str) + f"/{mes_sel}"
+        # Cruce para piezas y cadencia
+        df_cruce = pd.merge(df_melt, df_rel[['Cod_Match', 'TC_Master']], on='Cod_Match', how='left')
+        df_cruce['Pzas_Esp'] = (df_cruce['Min_Prod'] / df_cruce['TC_Master'].fillna(1).replace(0,1)) * df_cruce['Pzas_Por_Ciclo']
+        df_cruce['Dia'] = pd.to_datetime(df_cruce['Fecha'], errors='coerce').dt.day
 
     # ==========================================
-    # 5. DASHBOARD GERENCIAL
+    # 5. DASHBOARD - SECCIONES
     # ==========================================
-    st.title("🏭 Auditoría Gerencial de Performance")
+    st.title("🏭 Auditoría Gerencial Wiidem")
     
-    operadores_disponibles = sorted(df_final_diario['Operador_Full'].unique())
-    op_sel = st.selectbox("👤 Seleccionar Operador:", operadores_disponibles)
-    
-    df_op = df_final_diario[df_final_diario['Operador_Full'] == op_sel].sort_values('Dia').copy()
-    
+    # --- SECCIÓN NUEVA: LISTA GENERAL ---
+    st.header("🏆 Resumen General de Operarios")
+    with st.expander("Ver Listado Completo con Alertas (Rojo <80% o >100%)", expanded=True):
+        # Unimos la Planta (del Excel) con la Perfo (de SQL)
+        df_resumen = pd.merge(
+            df_melt.groupby('Operador_Full').agg({'Planta':'first'}).reset_index(),
+            df_sql_mes[['Operador_Full', 'Empresa', 'Perfo_SQL']],
+            on='Operador_Full', how='inner'
+        )
+        
+        df_resumen = df_resumen.rename(columns={'Perfo_SQL': 'OEE_Mensual (%)'})
+        df_resumen = df_resumen.sort_values('OEE_Mensual (%)', ascending=False)
+        
+        # Aplicamos el estilo
+        st.dataframe(
+            df_resumen.style.applymap(color_performance, subset=['OEE_Mensual (%)'])
+            .format({'OEE_Mensual (%)': '{:.1f}%'}),
+            use_container_width=True, hide_index=True
+        )
+
     st.divider()
     
-    # --- CONTROLES DE AJUSTE ---
+    # --- SECCIÓN: AUDITORÍA INDIVIDUAL ---
+    st.header("🔍 Auditoría Individual")
+    op_sel = st.selectbox("Seleccione Operador para analizar detalle diario:", sorted(df_resumen['Operador_Full'].unique()))
+    
+    # Filtrado datos operador
+    df_op_dia = df_cruce[df_cruce['Operador_Full'] == op_sel].groupby('Dia').agg({'Pzas_Real':'sum', 'Pzas_Esp':'sum', 'Min_Prod':'sum'}).reset_index()
+    sql_op = df_sql_dia[df_sql_dia['Operador_Full'] == op_sel].copy()
+    df_dash = pd.merge(df_op_dia, sql_op[['Dia', 'Perfo_SQL']], on='Dia', how='left').fillna(0)
+    df_dash['Fecha_Label'] = df_dash['Dia'].astype(str) + f"/{mes_sel}"
+
+    # Controles de Ajuste
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("🛠️ 1. Exclusión de Días")
-        st.write("Selecciona los días que NO deben promediarse:")
-        dias_excluidos = st.multiselect("Días a eliminar:", df_op['Fecha_Label'].tolist())
+        excluidos = st.multiselect("Eliminar días atípicos del promedio:", df_dash['Fecha_Label'].tolist())
     with c2:
-        st.subheader("⚖️ 2. Multiplicador de Performance")
-        st.write("Ajusta el porcentaje (100% = Sin cambios, 110% = Suma 10% extra al promedio)")
-        multiplicador = st.number_input("Multiplicador (%)", min_value=10.0, max_value=200.0, value=100.0, step=5.0)
+        multiplicador = st.number_input("Multiplicador de Ajuste (%)", 10.0, 200.0, 100.0, 5.0)
 
-    # --- CÁLCULOS AUDITADOS ---
-    # 1. Filtramos los días
-    df_valido = df_op[~df_op['Fecha_Label'].isin(dias_excluidos)]
-    
-    # 2. Promedios
-    perfo_original_mensual = df_op['Perfo_SQL'].mean() if not df_op.empty else 0
-    perfo_base_dias_validos = df_valido['Perfo_SQL'].mean() if not df_valido.empty else 0
-    
-    # 3. Aplicamos el multiplicador
-    perfo_final_auditada = perfo_base_dias_validos * (multiplicador / 100.0)
+    # Métricas
+    df_v = df_dash[~df_dash['Fecha_Label'].isin(excluidos)]
+    p_orig = df_dash['Perfo_SQL'].mean()
+    p_base = df_v['Perfo_SQL'].mean() if not df_v.empty else 0
+    p_final = p_base * (multiplicador / 100.0)
 
-    # --- MÉTRICAS VISUALES ---
-    st.write("")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("OEE Promedio Original", f"{perfo_original_mensual:.1f}%")
-    m2.metric(f"OEE Base ({len(df_valido)} días válidos)", f"{perfo_base_dias_validos:.1f}%", f"{(perfo_base_dias_validos - perfo_original_mensual):+.1f}% vs Orig.")
-    m3.metric("🎯 OEE FINAL AUDITADA", f"{perfo_final_auditada:.1f}%", f"x {multiplicador/100:.2f} (Multiplicador)")
-    m4.metric("Total Piezas Validadas", f"{df_valido['Pzas_Real'].sum():,.0f}")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("OEE Mensual Original", f"{p_orig:.1f}%")
+    m2.metric(f"OEE Días Válidos", f"{p_base:.1f}%", f"{p_base-p_orig:+.1f}%")
+    m3.metric("🎯 OEE FINAL AUDITADA", f"{p_final:.1f}%", f"x {multiplicador/100:.2f}")
 
-    st.divider()
-    
-    col_grafico, col_tabla = st.columns([1.2, 1])
-    
-    with col_grafico:
-        st.subheader("📊 Gráfico de Evolución Diaria")
-        df_op['Estado'] = df_op['Fecha_Label'].apply(lambda x: 'Excluido' if x in dias_excluidos else 'Válido')
-        
-        fig = px.bar(df_op, x='Fecha_Label', y='Perfo_SQL', color='Estado',
-                     color_discrete_map={'Válido':'#1A5276', 'Excluido':'#D5D8DC'},
-                     text=df_op['Perfo_SQL'].apply(lambda x: f"{x:.1f}%"))
-        
-        # Línea de la meta ajustada
-        fig.add_hline(y=perfo_final_auditada, line_dash="dash", line_color="red", 
-                      annotation_text=f"Meta Final: {perfo_final_auditada:.1f}%", 
-                      annotation_position="top left")
-        
-        fig.update_traces(textposition='outside')
-        fig.update_layout(yaxis_title="Performance OEE (%)", xaxis_title="Día", plot_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig, use_container_width=True)
+    # Gráfico y Tabla de Máquinas
+    df_dash['Estado'] = df_dash['Fecha_Label'].apply(lambda x: 'Excluido' if x in excluidos else 'Válido')
+    st.plotly_chart(px.bar(df_dash, x='Fecha_Label', y='Perfo_SQL', color='Estado', 
+                           color_discrete_map={'Válido':'#1A5276', 'Excluido':'#D5D8DC'},
+                           text=df_dash['Perfo_SQL'].apply(lambda x: f"{x:.1f}%")), use_container_width=True)
 
-    with col_tabla:
-        st.subheader("📝 Tabla de Producción (Días Válidos)")
-        df_valido['Cadencia (P/H)'] = np.where(df_valido['Min_Prod'] > 0, df_valido['Pzas_Real'] / (df_valido['Min_Prod']/60.0), 0)
-        df_valido['Diferencia'] = df_valido['Pzas_Real'] - df_valido['Pzas_Esp']
-        
-        df_mostrar = df_valido[['Fecha_Label', 'Perfo_SQL', 'Pzas_Real', 'Pzas_Esp', 'Diferencia', 'Cadencia (P/H)']].copy()
-        df_mostrar.columns = ['Día', 'OEE SQL (%)', 'Pz Reales', 'Pz Esperadas', 'Diferencia', 'Cadencia P/H']
-        
-        st.dataframe(df_mostrar.style.format({
-            'OEE SQL (%)': '{:.1f}%',
-            'Pz Reales': '{:,.0f}',
-            'Pz Esperadas': '{:,.0f}',
-            'Diferencia': '{:+,.0f}',
-            'Cadencia P/H': '{:.1f}'
-        }), hide_index=True, use_container_width=True)
+    st.subheader("📋 Desglose por Máquina y Cadencia")
+    df_maq = df_cruce[(df_cruce['Operador_Full'] == op_sel) & (~(df_cruce['Dia'].astype(str) + f"/{mes_sel}").isin(excluidos))].copy()
+    df_maq['Cadencia P/H'] = df_maq['Pzas_Real'] / (df_maq['Min_Prod']/60).replace(0,1)
+    st.dataframe(df_maq[['Fecha', 'Maquina', 'Pzas_Real', 'Cadencia P/H']].sort_values('Fecha'), use_container_width=True, hide_index=True)
 
 else:
-    st.info("👋 Por favor, sube los archivos de Producción (pueden ser varios) y el maestro de Relaciones en la barra lateral.")
+    st.info("👋 Sube los archivos en la barra lateral para generar el ranking y la auditoría.")
