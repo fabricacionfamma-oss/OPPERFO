@@ -137,19 +137,44 @@ if archivos_prod and archivo_rel:
         )
         
         df_resumen = df_resumen.rename(columns={'Perfo_SQL': 'OEE_Mensual (%)'})
-        df_resumen = df_resumen.sort_values('OEE_Mensual (%)', ascending=False)
+        df_resumen = df_resumen.sort_values('OEE_Mensual (%)', ascending=False).reset_index(drop=True)
         
-# Aplicamos el estilo
-        st.dataframe(
+        # Aplicamos el estilo y HABILITAMOS LA SELECCIÓN
+        evento = st.dataframe(
             df_resumen.style.map(color_performance, subset=['OEE_Mensual (%)'])
             .format({'OEE_Mensual (%)': '{:.1f}%'}),
-            use_container_width=True, hide_index=True
+            use_container_width=True, hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row"
         )
+
+        # Guardar la selección en el estado de la sesión
+        if len(evento.selection.rows) > 0:
+            fila_seleccionada = evento.selection.rows[0]
+            op_click = df_resumen.iloc[fila_seleccionada]['Operador_Full']
+            st.session_state['operador_seleccionado'] = op_click
+
     st.divider()
     
     # --- SECCIÓN: AUDITORÍA INDIVIDUAL ---
     st.header("🔍 Auditoría Individual")
-    op_sel = st.selectbox("Seleccione Operador para analizar detalle diario:", sorted(df_resumen['Operador_Full'].unique()))
+    
+    lista_operadores = sorted(df_resumen['Operador_Full'].unique())
+
+    # Determinar el índice a mostrar por defecto basado en la selección
+    if 'operador_seleccionado' in st.session_state and st.session_state['operador_seleccionado'] in lista_operadores:
+        indice_default = lista_operadores.index(st.session_state['operador_seleccionado'])
+    else:
+        indice_default = 0
+
+    op_sel = st.selectbox(
+        "Seleccione Operador para analizar detalle diario:", 
+        lista_operadores,
+        index=indice_default
+    )
+    
+    # Actualizamos el estado por si cambia manualmente el desplegable
+    st.session_state['operador_seleccionado'] = op_sel
     
     # Filtrado datos operador
     df_op_dia = df_cruce[df_cruce['Operador_Full'] == op_sel].groupby('Dia').agg({'Pzas_Real':'sum', 'Pzas_Esp':'sum', 'Min_Prod':'sum'}).reset_index()
