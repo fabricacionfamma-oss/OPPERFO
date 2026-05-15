@@ -200,16 +200,11 @@ if archivos_prod and archivo_rel:
     m2.metric(f"OEE Días Válidos", f"{p_base:.1f}%", f"{p_base-p_orig:+.1f}%")
     m3.metric("🎯 OEE FINAL AUDITADA", f"{p_final:.1f}%", f"x {multiplicador/100:.2f}")
 
-    # Gráfico y Tabla de Máquinas
+    # Gráfico 
     df_dash['Estado'] = df_dash['Fecha_Label'].apply(lambda x: 'Excluido' if x in excluidos else 'Válido')
     st.plotly_chart(px.bar(df_dash, x='Fecha_Label', y='Perfo_SQL', color='Estado', 
                            color_discrete_map={'Válido':'#1A5276', 'Excluido':'#D5D8DC'},
                            text=df_dash['Perfo_SQL'].apply(lambda x: f"{x:.1f}%")), use_container_width=True)
-
-    st.subheader("📋 Desglose por Máquina y Cadencia")
-    df_maq = df_cruce[(df_cruce['Operador_Full'] == op_sel) & (~(df_cruce['Dia'].astype(str) + f"/{mes_sel}").isin(excluidos))].copy()
-    df_maq['Cadencia P/H'] = df_maq['Pzas_Real'] / (df_maq['Min_Prod']/60).replace(0,1)
-    st.dataframe(df_maq[['Fecha', 'Maquina', 'Pzas_Real', 'Cadencia P/H']].sort_values('Fecha'), use_container_width=True, hide_index=True)
 
 else:
     st.info("👋 Sube los archivos en la barra lateral para generar el ranking y la auditoría.")
