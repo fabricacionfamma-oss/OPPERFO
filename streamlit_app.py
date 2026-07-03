@@ -20,21 +20,19 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Función para aplicar colores a la tabla en Streamlit
 def color_performance(val):
     if val > 100 or val < 80:
-        return 'color: #D32F2F; font-weight: bold;' # Rojo para desvíos
+        return 'color: #D32F2F; font-weight: bold;'
     else:
-        return 'color: #2E7D32;' # Verde para rango normal (80-100)
+        return 'color: #2E7D32;'
 
 # ==========================================
-# GENERADOR DE EXCEL (PROCESAMIENTO EN MEMORIA)
+# 2. GENERADOR DE EXCEL
 # ==========================================
 def generar_excel_descargable(df_resumen, df_dia, mes, anio):
     output = io.BytesIO()
     wb = openpyxl.Workbook()
     
-    # Estilos del Excel
     font_title = Font(name="Calibri", size=16, bold=True, color="1A5276")
     font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
     font_body = Font(name="Calibri", size=11)
@@ -99,7 +97,6 @@ def generar_excel_descargable(df_resumen, df_dia, mes, anio):
     
     for _, row_data in df_diario_sorted.iterrows():
         if operador_actual != row_data["Operador_Full"] and operador_actual is not None:
-            # Insertar Gráfico del operador anterior antes de pasar al siguiente
             chart = BarChart()
             chart.type = "col"
             chart.style = 10
@@ -135,7 +132,6 @@ def generar_excel_descargable(df_resumen, df_dia, mes, anio):
             
         current_row += 1
 
-    # Procesar el último operador de la lista para su gráfico
     if operador_actual is not None:
         chart = BarChart()
         chart.type = "col"
@@ -159,7 +155,7 @@ def generar_excel_descargable(df_resumen, df_dia, mes, anio):
     return output
 
 # ==========================================
-# 2. MOTOR SQL (RESTAURADO ORIGINAL)
+# 3. MOTOR SQL (AUTOMÁTICO)
 # ==========================================
 @st.cache_data(ttl=600)
 def extraer_sql_data(mes, anio):
@@ -183,14 +179,15 @@ def extraer_sql_data(mes, anio):
     df_m_fa, df_d_fa = fetch_db("famma_db")
     df_m_fu, df_d_fu = fetch_db("fumi_db")
     
-    # Marcamos la empresa antes de unir
-    df_m_fa['Empresa'] = 'FAMMA'
-    df_m_fu['Empresa'] = 'FUMISCOR'
+    # --- CORRECCIÓN AQUÍ: Asignar empresa también a los DataFrames diarios ---
+    if not df_m_fa.empty: df_m_fa['Empresa'] = 'FAMMA'
+    if not df_d_fa.empty: df_d_fa['Empresa'] = 'FAMMA'
+    if not df_m_fu.empty: df_m_fu['Empresa'] = 'FUMISCOR'
+    if not df_d_fu.empty: df_d_fu['Empresa'] = 'FUMISCOR'
     
     df_mes = pd.concat([df_m_fa, df_m_fu], ignore_index=True)
     df_dia = pd.concat([df_d_fa, df_d_fu], ignore_index=True)
     
-    # --- FILTRO: Eliminar operarios con legajo que empiece con FW ---
     if not df_mes.empty:
         df_mes = df_mes[~df_mes['Legajo'].astype(str).str.upper().str.startswith('FW')]
     if not df_dia.empty:
@@ -204,14 +201,14 @@ def extraer_sql_data(mes, anio):
     return df_mes.drop_duplicates(subset=['Operador_Full']), df_dia
 
 # ==========================================
-# 3. BARRA LATERAL
+# 4. BARRA LATERAL
 # ==========================================
 st.sidebar.header("📅 Periodo a Auditar")
 mes_sel = st.sidebar.slider("Mes", 1, 12, 4)
 anio_sel = st.sidebar.number_input("Año", 2024, 2030, 2026)
 
 # ==========================================
-# 4. PROCESAMIENTO Y DASHBOARD
+# 5. PROCESAMIENTO Y DASHBOARD
 # ==========================================
 with st.spinner("Sincronizando con base de datos SQL..."):
     df_sql_mes, df_sql_dia = extraer_sql_data(mes_sel, anio_sel)
@@ -222,12 +219,10 @@ if not df_sql_mes.empty:
     
     st.header("🏆 Resumen General de Operarios")
     
-    # Preparación de datos reales
     df_resumen = df_sql_mes[['Operador_Full', 'Empresa', 'Perfo_SQL']].copy()
     df_resumen = df_resumen.rename(columns={'Perfo_SQL': 'Perfo_Mensual (%)'})
     df_resumen = df_resumen.sort_values('Perfo_Mensual (%)', ascending=False).reset_index(drop=True)
 
-    # --- BOTÓN DE EXPORTAR A EXCEL INTEGRADO ---
     col_export, col_vacio = st.columns([1, 4])
     with col_export:
         archivo_excel = generar_excel_descargable(df_resumen, df_sql_dia, mes_sel, anio_sel)
@@ -255,7 +250,6 @@ if not df_sql_mes.empty:
 
     st.divider()
     
-    # --- SECCIÓN: AUDITORÍA INDIVIDUAL ---
     st.header("🔍 Auditoría Individual")
     
     lista_operadores = sorted(df_resumen['Operador_Full'].unique())
