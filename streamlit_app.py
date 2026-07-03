@@ -20,20 +20,21 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# Función para aplicar colores a la tabla en Streamlit
 def color_performance(val):
     if val > 100 or val < 80:
-        return 'color: #D32F2F; font-weight: bold;'
+        return 'color: #D32F2F; font-weight: bold;' # Rojo para desvíos
     else:
-        return 'color: #2E7D32;'
+        return 'color: #2E7D32;' # Verde para rango normal (80-100)
 
 # ==========================================
-# GENERADOR DE EXCEL (NUEVA FUNCIÓN)
+# GENERADOR DE EXCEL (PROCESAMIENTO EN MEMORIA)
 # ==========================================
 def generar_excel_descargable(df_resumen, df_dia, mes, anio):
     output = io.BytesIO()
     wb = openpyxl.Workbook()
     
-    # Estilos
+    # Estilos del Excel
     font_title = Font(name="Calibri", size=16, bold=True, color="1A5276")
     font_header = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
     font_body = Font(name="Calibri", size=11)
@@ -51,7 +52,7 @@ def generar_excel_descargable(df_resumen, df_dia, mes, anio):
     # --- PESTAÑA 1: RESUMEN GENERAL ---
     ws1 = wb.active
     ws1.title = "Resumen General"
-    ws1.views.sheetView[0].showGridLines = False
+    ws1.views.sheetView[0].showGridLines = True
     
     ws1.cell(row=2, column=2, value="REPORTE DE AUDITORÍA GERENCIAL").font = font_title
     ws1.cell(row=3, column=2, value=f"Periodo: Mes {mes} / Año {anio}").font = font_body
@@ -77,11 +78,11 @@ def generar_excel_descargable(df_resumen, df_dia, mes, anio):
             c_perf.fill = fill_alert_green; c_perf.font = font_alert_green
 
     for col in range(2, 5):
-        ws1.column_dimensions[get_column_letter(col)].width = 25
+        ws1.column_dimensions[get_column_letter(col)].width = 30
 
     # --- PESTAÑA 2: DETALLE DIARIO Y GRÁFICOS ---
     ws2 = wb.create_sheet(title="Detalle Diario")
-    ws2.views.sheetView[0].showGridLines = False
+    ws2.views.sheetView[0].showGridLines = True
     
     ws2.cell(row=2, column=2, value="DESGLOSE DIARIO POR OPERADOR").font = font_title
     
@@ -97,9 +98,8 @@ def generar_excel_descargable(df_resumen, df_dia, mes, anio):
     operador_actual = None
     
     for _, row_data in df_diario_sorted.iterrows():
-        # Detectar cambio de operador para graficar
         if operador_actual != row_data["Operador_Full"] and operador_actual is not None:
-            # Insertar Gráfico del operador anterior
+            # Insertar Gráfico del operador anterior antes de pasar al siguiente
             chart = BarChart()
             chart.type = "col"
             chart.style = 10
@@ -135,6 +135,22 @@ def generar_excel_descargable(df_resumen, df_dia, mes, anio):
             
         current_row += 1
 
+    # Procesar el último operador de la lista para su gráfico
+    if operador_actual is not None:
+        chart = BarChart()
+        chart.type = "col"
+        chart.style = 10
+        chart.title = f"Rendimiento - {operador_actual}"
+        chart.y_axis.title = "Performance"
+        chart.x_axis.title = "Día"
+        data_ref = Reference(ws2, min_col=5, min_row=start_row_op-1, max_row=current_row-1)
+        cats_ref = Reference(ws2, min_col=4, min_row=start_row_op, max_row=current_row-1)
+        chart.add_data(data_ref, titles_from_data=True)
+        chart.set_categories(cats_ref)
+        chart.legend = None
+        chart.height = 10; chart.width = 15
+        ws2.add_chart(chart, f"G{start_row_op}")
+
     for col in range(2, 6):
         ws2.column_dimensions[get_column_letter(col)].width = 20
 
@@ -143,15 +159,49 @@ def generar_excel_descargable(df_resumen, df_dia, mes, anio):
     return output
 
 # ==========================================
-# 2. MOTOR SQL (AUTOMÁTICO) -> Mantén tu código original aquí
+# 2. MOTOR SQL (RESTAURADO ORIGINAL)
 # ==========================================
 @st.cache_data(ttl=600)
 def extraer_sql_data(mes, anio):
-    # Simulación para que el código no rompa (aquí debes mantener tu función real de base de datos)
-    df_m = pd.DataFrame([{"Nombre": "JUAN P", "Legajo": "10", "Perfo_SQL": 95, "Empresa": "FAMMA"}])
-    df_m['Operador_Full'] = df_m['Nombre'] + " (" + df_m['Legajo'] + ")"
-    df_d = pd.DataFrame([{"Nombre": "JUAN P", "Legajo": "10", "Dia": 1, "Perfo_SQL": 90, "Empresa": "FAMMA", "Operador_Full": "JUAN P (10)"}])
-    return df_m, df_d
+    def fetch_db(conn_name):
+        try:
+            conn = st.connection(conn_name, type="sql")
+            q_m = f"""SELECT op.Name as Nombre, op.Docket as Legajo, 
+                      SUM(p.Performance * p.ProductiveTime) / NULLIF(SUM(p.ProductiveTime), 0) as Perfo_SQL
+                      FROM OPER_M_01 p JOIN OPERATOR op ON p.OperatorId = op.OperatorId 
+                      WHERE p.Month = {mes} AND p.Year = {anio}
+                      GROUP BY op.Name, op.Docket"""
+            q_d = f"""SELECT op.Name as Nombre, op.Docket as Legajo, DAY(p.Date) as Dia, 
+                      SUM(p.Performance * p.ProductiveTime) / NULLIF(SUM(p.ProductiveTime), 0) as Perfo_SQL
+                      FROM OPER_D_01 p JOIN OPERATOR op ON p.OperatorId = op.OperatorId 
+                      WHERE MONTH(p.Date) = {mes} AND YEAR(p.Date) = {anio}
+                      GROUP BY op.Name, op.Docket, DAY(p.Date)"""
+            return conn.query(q_m), conn.query(q_d)
+        except Exception:
+            return pd.DataFrame(), pd.DataFrame()
+
+    df_m_fa, df_d_fa = fetch_db("famma_db")
+    df_m_fu, df_d_fu = fetch_db("fumi_db")
+    
+    # Marcamos la empresa antes de unir
+    df_m_fa['Empresa'] = 'FAMMA'
+    df_m_fu['Empresa'] = 'FUMISCOR'
+    
+    df_mes = pd.concat([df_m_fa, df_m_fu], ignore_index=True)
+    df_dia = pd.concat([df_d_fa, df_d_fu], ignore_index=True)
+    
+    # --- FILTRO: Eliminar operarios con legajo que empiece con FW ---
+    if not df_mes.empty:
+        df_mes = df_mes[~df_mes['Legajo'].astype(str).str.upper().str.startswith('FW')]
+    if not df_dia.empty:
+        df_dia = df_dia[~df_dia['Legajo'].astype(str).str.upper().str.startswith('FW')]
+    
+    for df in [df_mes, df_dia]:
+        if not df.empty:
+            df['Perfo_SQL'] = np.where(df['Perfo_SQL'] > 1.5, df['Perfo_SQL']/100, df['Perfo_SQL']) * 100
+            df['Operador_Full'] = df['Nombre'].astype(str).str.upper() + " (" + df['Legajo'].astype(str) + ")"
+            
+    return df_mes.drop_duplicates(subset=['Operador_Full']), df_dia
 
 # ==========================================
 # 3. BARRA LATERAL
@@ -164,7 +214,7 @@ anio_sel = st.sidebar.number_input("Año", 2024, 2030, 2026)
 # 4. PROCESAMIENTO Y DASHBOARD
 # ==========================================
 with st.spinner("Sincronizando con base de datos SQL..."):
-    df_sql_mes, df_sql_dia = extraer_sql_data(mes_sel, anio_sel) # <- Usa tu función real aquí
+    df_sql_mes, df_sql_dia = extraer_sql_data(mes_sel, anio_sel)
 
 st.title("🏭 Auditoría Gerencial Wiidem")
 
@@ -172,12 +222,12 @@ if not df_sql_mes.empty:
     
     st.header("🏆 Resumen General de Operarios")
     
-    # Preparamos los datos del resumen
+    # Preparación de datos reales
     df_resumen = df_sql_mes[['Operador_Full', 'Empresa', 'Perfo_SQL']].copy()
     df_resumen = df_resumen.rename(columns={'Perfo_SQL': 'Perfo_Mensual (%)'})
     df_resumen = df_resumen.sort_values('Perfo_Mensual (%)', ascending=False).reset_index(drop=True)
 
-    # --- BOTÓN DE EXPORTAR A EXCEL (AQUÍ VA LA INTEGRACIÓN) ---
+    # --- BOTÓN DE EXPORTAR A EXCEL INTEGRADO ---
     col_export, col_vacio = st.columns([1, 4])
     with col_export:
         archivo_excel = generar_excel_descargable(df_resumen, df_sql_dia, mes_sel, anio_sel)
