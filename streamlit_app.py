@@ -24,33 +24,38 @@ def color_performance(val):
         return 'color: #2E7D32;' # Verde para rango normal (80-100)
 
 # ==========================================
-# 2. MOTOR SQL (AUTOMÁTICO)
+# 2. MOTOR SQL (CON DEBÚGUEO DE ERRORES)
 # ==========================================
 @st.cache_data(ttl=600)
 def extraer_sql_data(mes, anio):
     def fetch_db(conn_name):
         try:
             conn = st.connection(conn_name, type="sql")
+            
+            # 1. Consulta Mensual
             q_m = f"""SELECT op.Name as Nombre, op.Docket as Legajo, 
                       SUM(p.Performance * p.ProductiveTime) / NULLIF(SUM(p.ProductiveTime), 0) as Perfo_SQL
                       FROM OPER_M_01 p JOIN OPERATOR op ON p.OperatorId = op.OperatorId 
                       WHERE p.Month = {mes} AND p.Year = {anio}
                       GROUP BY op.Name, op.Docket"""
             
+            # 2. Consulta Diaria
             q_d = f"""SELECT op.Name as Nombre, op.Docket as Legajo, DAY(p.Date) as Dia, 
                       SUM(p.Performance * p.ProductiveTime) / NULLIF(SUM(p.ProductiveTime), 0) as Perfo_SQL
                       FROM OPER_D_01 p JOIN OPERATOR op ON p.OperatorId = op.OperatorId 
                       WHERE MONTH(p.Date) = {mes} AND YEAR(p.Date) = {anio}
                       GROUP BY op.Name, op.Docket, DAY(p.Date)"""
             
-            # Consulta para extraer las máquinas del operario
+            # 3. Consulta de Máquinas (Revisar si 'p.Machine' se llama así en tu BD)
             q_mac = f"""SELECT op.Name as Nombre, op.Docket as Legajo, p.Machine as Maquina
                         FROM OPER_D_01 p JOIN OPERATOR op ON p.OperatorId = op.OperatorId
                         WHERE MONTH(p.Date) = {mes} AND YEAR(p.Date) = {anio}
                         GROUP BY op.Name, op.Docket, p.Machine"""
                         
             return conn.query(q_m), conn.query(q_d), conn.query(q_mac)
-        except Exception:
+        except Exception as e:
+            # Captura y muestra el error real en la interfaz de Streamlit
+            st.error(f"❌ Error en la base de datos '{conn_name}': {e}")
             return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     df_m_fa, df_d_fa, df_mac_fa = fetch_db("famma_db")
@@ -72,7 +77,7 @@ def extraer_sql_data(mes, anio):
     if not df_mac.empty:
         df_mac = df_mac[~df_mac['Legajo'].astype(str).str.upper().str.startswith('FW')]
     
-    # Consolidar máquinas por operario
+    # Consolidar máquinas por operario (un string separado por comas)
     if not df_mac.empty:
         df_mac['Operador_Full'] = df_mac['Nombre'].astype(str).str.upper() + " (" + df_mac['Legajo'].astype(str) + ")"
         maquinas_series = df_mac.groupby('Operador_Full')['Maquina'].apply(
@@ -81,13 +86,13 @@ def extraer_sql_data(mes, anio):
     else:
         maquinas_series = pd.Series(dtype=str)
     
-    # Procesar métricas y nombres
+    # Procesar métricas y nombres full
     for df in [df_mes, df_dia]:
         if not df.empty:
             df['Perfo_SQL'] = np.where(df['Perfo_SQL'] > 1.5, df['Perfo_SQL']/100, df['Perfo_SQL']) * 100
             df['Operador_Full'] = df['Nombre'].astype(str).str.upper() + " (" + df['Legajo'].astype(str) + ")"
             
-    # Mapear máquinas al dataframe mensual
+    # Mapear listado de máquinas al dataframe mensual
     if not df_mes.empty:
         df_mes['Máquinas'] = df_mes['Operador_Full'].map(maquinas_series).fillna('Sin registrar')
         
@@ -135,6 +140,7 @@ if not df_sql_mes.empty:
         st.write("") 
         col1, col2 = st.columns(2)
         
+        # Descarga CSV
         csv_data = df_resumen.to_csv(index=False).encode('utf-8')
         col1.download_button(
             label="📥 Descargar Listado (CSV)",
@@ -144,17 +150,20 @@ if not df_sql_mes.empty:
             use_container_width=True
         )
         
+        # Función interna para estructurar PDF horizontal (A4 Landscape)
         def crear_pdf(df, mes, anio):
             pdf = FPDF(orientation='L', unit='mm', format='A4')
             pdf.add_page()
             
+            # Título
             pdf.set_font("Arial", 'B', 16)
             pdf.cell(0, 10, f"Auditoría Gerencial Wiidem - Periodo: {mes}/{anio}", ln=True, align='C')
             pdf.ln(5)
             
+            # Cabecera de Tabla
             pdf.set_font("Arial", 'B', 10)
-            pdf.set_fill_color(26, 82, 118)
-            pdf.set_text_color(255, 255, 255)
+            pdf.set_fill_color(26, 82, 118) # Azul corporativo
+            pdf.set_text_color(255, 255, 255) # Blanco
             
             col_widths = [75, 25, 25, 145] 
             headers = ['Operador (Legajo)', 'Planta', 'Perfo', 'Máquinas Operadas']
@@ -163,20 +172,23 @@ if not df_sql_mes.empty:
                 pdf.cell(col_widths[i], 8, headers[i], border=1, fill=True, align='C')
             pdf.ln()
             
+            # Filas de Datos
             pdf.set_font("Arial", '', 9)
             
             for index, row in df.iterrows():
                 perfo = row['Perfo_Mensual (%)']
                 
+                # Formato condicional de color según desvíos
                 if perfo < 80 or perfo > 100:
-                    pdf.set_text_color(211, 47, 47)
+                    pdf.set_text_color(211, 47, 47) # Rojo
                 else:
-                    pdf.set_text_color(46, 125, 50)
+                    pdf.set_text_color(46, 125, 50) # Verde
                 
                 pdf.cell(col_widths[0], 8, str(row['Operador_Full'])[:45], border=1)
                 pdf.cell(col_widths[1], 8, str(row['Empresa']), border=1, align='C')
                 pdf.cell(col_widths[2], 8, f"{perfo:.1f}%", border=1, align='C')
                 
+                # Texto negro estándar para la lista de máquinas
                 pdf.set_text_color(0, 0, 0)
                 pdf.cell(col_widths[3], 8, str(row['Máquinas'])[:90], border=1)
                 pdf.ln()
@@ -244,4 +256,4 @@ if not df_sql_mes.empty:
         st.warning("No hay datos diarios para este operador en el mes seleccionado.")
 
 else:
-    st.info("No se encontraron datos en la base de datos para el mes y año seleccionados.")
+    st.info("No se encontraron datos en la base de datos para el mes y año seleccionados o las consultas están fallando.")
