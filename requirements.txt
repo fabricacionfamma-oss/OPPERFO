@@ -4,3 +4,4 @@ plotly
 sqlalchemy
 pymssql
 openpyxl
+fpdf
