@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+from fpdf import FPDF
 
 # ==========================================
 # 1. CONFIGURACIÓN DE LA PÁGINA
@@ -15,7 +16,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Función para aplicar colores a la tabla
+# Función para aplicar colores a la tabla interactiva
 def color_performance(val):
     if val > 100 or val < 80:
         return 'color: #D32F2F; font-weight: bold;' # Rojo para desvíos
@@ -35,17 +36,25 @@ def extraer_sql_data(mes, anio):
                       FROM OPER_M_01 p JOIN OPERATOR op ON p.OperatorId = op.OperatorId 
                       WHERE p.Month = {mes} AND p.Year = {anio}
                       GROUP BY op.Name, op.Docket"""
+            
             q_d = f"""SELECT op.Name as Nombre, op.Docket as Legajo, DAY(p.Date) as Dia, 
                       SUM(p.Performance * p.ProductiveTime) / NULLIF(SUM(p.ProductiveTime), 0) as Perfo_SQL
                       FROM OPER_D_01 p JOIN OPERATOR op ON p.OperatorId = op.OperatorId 
                       WHERE MONTH(p.Date) = {mes} AND YEAR(p.Date) = {anio}
                       GROUP BY op.Name, op.Docket, DAY(p.Date)"""
-            return conn.query(q_m), conn.query(q_d)
+            
+            # Consulta para extraer las máquinas del operario
+            q_mac = f"""SELECT op.Name as Nombre, op.Docket as Legajo, p.Machine as Maquina
+                        FROM OPER_D_01 p JOIN OPERATOR op ON p.OperatorId = op.OperatorId
+                        WHERE MONTH(p.Date) = {mes} AND YEAR(p.Date) = {anio}
+                        GROUP BY op.Name, op.Docket, p.Machine"""
+                        
+            return conn.query(q_m), conn.query(q_d), conn.query(q_mac)
         except Exception:
-            return pd.DataFrame(), pd.DataFrame()
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    df_m_fa, df_d_fa = fetch_db("famma_db")
-    df_m_fu, df_d_fu = fetch_db("fumi_db")
+    df_m_fa, df_d_fa, df_mac_fa = fetch_db("famma_db")
+    df_m_fu, df_d_fu, df_mac_fu = fetch_db("fumi_db")
     
     # Marcamos la empresa antes de unir
     df_m_fa['Empresa'] = 'FAMMA'
@@ -53,18 +62,35 @@ def extraer_sql_data(mes, anio):
     
     df_mes = pd.concat([df_m_fa, df_m_fu], ignore_index=True)
     df_dia = pd.concat([df_d_fa, df_d_fu], ignore_index=True)
+    df_mac = pd.concat([df_mac_fa, df_mac_fu], ignore_index=True)
     
-    # --- FILTRO NUEVO: Eliminar operarios con legajo que empiece con FW ---
+    # Filtro: Eliminar operarios con legajo que empiece con FW
     if not df_mes.empty:
         df_mes = df_mes[~df_mes['Legajo'].astype(str).str.upper().str.startswith('FW')]
     if not df_dia.empty:
         df_dia = df_dia[~df_dia['Legajo'].astype(str).str.upper().str.startswith('FW')]
+    if not df_mac.empty:
+        df_mac = df_mac[~df_mac['Legajo'].astype(str).str.upper().str.startswith('FW')]
     
+    # Consolidar máquinas por operario
+    if not df_mac.empty:
+        df_mac['Operador_Full'] = df_mac['Nombre'].astype(str).str.upper() + " (" + df_mac['Legajo'].astype(str) + ")"
+        maquinas_series = df_mac.groupby('Operador_Full')['Maquina'].apply(
+            lambda x: ', '.join(sorted(list(set(x.dropna().astype(str)))))
+        )
+    else:
+        maquinas_series = pd.Series(dtype=str)
+    
+    # Procesar métricas y nombres
     for df in [df_mes, df_dia]:
         if not df.empty:
             df['Perfo_SQL'] = np.where(df['Perfo_SQL'] > 1.5, df['Perfo_SQL']/100, df['Perfo_SQL']) * 100
             df['Operador_Full'] = df['Nombre'].astype(str).str.upper() + " (" + df['Legajo'].astype(str) + ")"
             
+    # Mapear máquinas al dataframe mensual
+    if not df_mes.empty:
+        df_mes['Máquinas'] = df_mes['Operador_Full'].map(maquinas_series).fillna('Sin registrar')
+        
     return df_mes.drop_duplicates(subset=['Operador_Full']), df_dia
 
 # ==========================================
@@ -82,19 +108,16 @@ with st.spinner("Sincronizando con base de datos SQL..."):
 
 st.title("🏭 Auditoría Gerencial Wiidem")
 
-# Solo renderizamos si hay datos en SQL para ese mes/año
 if not df_sql_mes.empty:
     
-    # --- SECCIÓN NUEVA: LISTA GENERAL ---
+    # --- SECCIÓN: LISTA GENERAL ---
     st.header("🏆 Resumen General de Operarios")
     with st.expander("Ver Listado Completo con Alertas (Rojo <80% o >100%)", expanded=True):
         
-        # Nos quedamos con los datos directo de SQL
-        df_resumen = df_sql_mes[['Operador_Full', 'Empresa', 'Perfo_SQL']].copy()
+        df_resumen = df_sql_mes[['Operador_Full', 'Empresa', 'Perfo_SQL', 'Máquinas']].copy()
         df_resumen = df_resumen.rename(columns={'Perfo_SQL': 'Perfo_Mensual (%)'})
         df_resumen = df_resumen.sort_values('Perfo_Mensual (%)', ascending=False).reset_index(drop=True)
         
-        # Aplicamos el estilo y HABILITAMOS LA SELECCIÓN
         evento = st.dataframe(
             df_resumen.style.map(color_performance, subset=['Perfo_Mensual (%)'])
             .format({'Perfo_Mensual (%)': '{:.1f}%'}),
@@ -103,11 +126,74 @@ if not df_sql_mes.empty:
             selection_mode="single-row"
         )
 
-        # Guardar la selección en el estado de la sesión
         if len(evento.selection.rows) > 0:
             fila_seleccionada = evento.selection.rows[0]
             op_click = df_resumen.iloc[fila_seleccionada]['Operador_Full']
             st.session_state['operador_seleccionado'] = op_click
+
+        # --- GENERACIÓN DE REPORTES (CSV Y PDF) ---
+        st.write("") 
+        col1, col2 = st.columns(2)
+        
+        csv_data = df_resumen.to_csv(index=False).encode('utf-8')
+        col1.download_button(
+            label="📥 Descargar Listado (CSV)",
+            data=csv_data,
+            file_name=f"reporte_operarios_{mes_sel}_{anio_sel}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        
+        def crear_pdf(df, mes, anio):
+            pdf = FPDF(orientation='L', unit='mm', format='A4')
+            pdf.add_page()
+            
+            pdf.set_font("Arial", 'B', 16)
+            pdf.cell(0, 10, f"Auditoría Gerencial Wiidem - Periodo: {mes}/{anio}", ln=True, align='C')
+            pdf.ln(5)
+            
+            pdf.set_font("Arial", 'B', 10)
+            pdf.set_fill_color(26, 82, 118)
+            pdf.set_text_color(255, 255, 255)
+            
+            col_widths = [75, 25, 25, 145] 
+            headers = ['Operador (Legajo)', 'Planta', 'Perfo', 'Máquinas Operadas']
+            
+            for i in range(len(headers)):
+                pdf.cell(col_widths[i], 8, headers[i], border=1, fill=True, align='C')
+            pdf.ln()
+            
+            pdf.set_font("Arial", '', 9)
+            
+            for index, row in df.iterrows():
+                perfo = row['Perfo_Mensual (%)']
+                
+                if perfo < 80 or perfo > 100:
+                    pdf.set_text_color(211, 47, 47)
+                else:
+                    pdf.set_text_color(46, 125, 50)
+                
+                pdf.cell(col_widths[0], 8, str(row['Operador_Full'])[:45], border=1)
+                pdf.cell(col_widths[1], 8, str(row['Empresa']), border=1, align='C')
+                pdf.cell(col_widths[2], 8, f"{perfo:.1f}%", border=1, align='C')
+                
+                pdf.set_text_color(0, 0, 0)
+                pdf.cell(col_widths[3], 8, str(row['Máquinas'])[:90], border=1)
+                pdf.ln()
+                
+            return pdf.output(dest='S').encode('latin1')
+
+        try:
+            pdf_bytes = crear_pdf(df_resumen, mes_sel, anio_sel)
+            col2.download_button(
+                label="📄 Descargar Listado (PDF)",
+                data=pdf_bytes,
+                file_name=f"reporte_operarios_{mes_sel}_{anio_sel}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+        except NameError:
+            col2.error("Falta instalar la librería fpdf (Ejecuta: pip install fpdf)")
 
     st.divider()
     
@@ -116,7 +202,6 @@ if not df_sql_mes.empty:
     
     lista_operadores = sorted(df_resumen['Operador_Full'].unique())
 
-    # Determinar el índice a mostrar por defecto basado en la selección
     if 'operador_seleccionado' in st.session_state and st.session_state['operador_seleccionado'] in lista_operadores:
         indice_default = lista_operadores.index(st.session_state['operador_seleccionado'])
     else:
@@ -128,22 +213,18 @@ if not df_sql_mes.empty:
         index=indice_default
     )
     
-    # Actualizamos el estado por si cambia manualmente el desplegable
     st.session_state['operador_seleccionado'] = op_sel
     
-    # Filtrado datos operador directo de SQL
     sql_op = df_sql_dia[df_sql_dia['Operador_Full'] == op_sel].copy()
     df_dash = sql_op[['Dia', 'Perfo_SQL']].copy().fillna(0)
     df_dash['Fecha_Label'] = df_dash['Dia'].astype(str) + f"/{mes_sel}"
 
-    # Controles de Ajuste
     c1, c2 = st.columns(2)
     with c1:
         excluidos = st.multiselect("Eliminar días atípicos del promedio:", df_dash['Fecha_Label'].tolist())
     with c2:
         multiplicador = st.number_input("Multiplicador de Ajuste (%)", 10.0, 200.0, 100.0, 5.0)
 
-    # Métricas
     df_v = df_dash[~df_dash['Fecha_Label'].isin(excluidos)]
     p_orig = df_dash['Perfo_SQL'].mean() if not df_dash.empty else 0
     p_base = df_v['Perfo_SQL'].mean() if not df_v.empty else 0
@@ -154,7 +235,6 @@ if not df_sql_mes.empty:
     m2.metric(f"Perfo Días Válidos", f"{p_base:.1f}%", f"{p_base-p_orig:+.1f}%")
     m3.metric("🎯 PERFO FINAL AUDITADA", f"{p_final:.1f}%", f"x {multiplicador/100:.2f}")
 
-    # Gráfico 
     if not df_dash.empty:
         df_dash['Estado'] = df_dash['Fecha_Label'].apply(lambda x: 'Excluido' if x in excluidos else 'Válido')
         st.plotly_chart(px.bar(df_dash, x='Fecha_Label', y='Perfo_SQL', color='Estado', 
